@@ -1,0 +1,40 @@
+# OS / Editor artifacts
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*.log
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Node / frontend
+node_modules/
+dist/
+.vite/
+.next/
+*.tsbuildinfo
+
+# Python / backend
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Docker / Compose
+*.pid
+*.seed
+/volumes/
+
+# Supabase CLI
+supabase/.branches
+supabase/.temp
+supabase/functions/.netlify/
+
+# Misc build cache
+coverage/
+tmp/
+docs/
