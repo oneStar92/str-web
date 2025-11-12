@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { HiMenuAlt2, HiLogout } from 'react-icons/hi';
 import { supabase } from '../lib/supabaseClient.js';
 
 const ADMIN_ROLES = ['SUPER', 'ADMIN'];
@@ -24,6 +25,9 @@ export default function Home() {
   const [memberForm, setMemberForm] = useState({ name: '', first_squad_power: '', hero_power: '' });
   const [memberStatus, setMemberStatus] = useState({ type: '', message: '' });
   const [isSubmittingMember, setIsSubmittingMember] = useState(false);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [isCompactView, setIsCompactView] = useState(false);
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
   const [members, setMembers] = useState([]);
   const [originalMembers, setOriginalMembers] = useState([]);
@@ -119,6 +123,23 @@ export default function Home() {
     }
   }, [activeSection, memberPage, permission, loadMembers]);
 
+  useEffect(() => {
+    const handleResize = () => {
+      setIsCompactView(window.innerWidth <= 768);
+    };
+
+    handleResize();
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  useEffect(() => {
+    if (!isCompactView) {
+      setIsMobileMenuOpen(false);
+      setIsSidebarOpen(true);
+    }
+  }, [isCompactView]);
+
   const handleLogout = async () => {
     await supabase?.auth.signOut();
     navigate('/');
@@ -191,6 +212,9 @@ export default function Home() {
     setActiveSection(item.id);
     if (item.id === 'member') {
       setMemberPage(1);
+    }
+    if (isCompactView) {
+      setIsMobileMenuOpen(false);
     }
   };
 
@@ -296,6 +320,13 @@ export default function Home() {
             <div className="member-actions">
               <button
                 type="button"
+                className="member-action-btn tertiary"
+                onClick={() => setIsMemberModalOpen(true)}
+              >
+                연맹원 추가
+              </button>
+              <button
+                type="button"
                 className="member-action-btn secondary"
                 disabled={!hasMemberChanges || isSavingMembers}
                 onClick={handleMemberRevert}
@@ -316,65 +347,122 @@ export default function Home() {
           <div className="member-table-wrapper">
             {memberError && <p className="member-error">{memberError}</p>}
 
-            {!memberError && (
-              <table className="member-table">
-                <thead>
-                  <tr>
-                    <th>아이디</th>
-                    <th>1군 투력</th>
-                    <th>총 영웅 투력</th>
-                  </tr>
-                </thead>
-                <tbody>
+            {!memberError &&
+              (isCompactView ? (
+                <div className="member-mobile-list">
                   {isLoadingMembers ? (
-                    <tr>
-                      <td colSpan="3">연맹원 정보를 불러오는 중입니다…</td>
-                    </tr>
+                    <p className="member-mobile-empty">연맹원 정보를 불러오는 중입니다…</p>
                   ) : members.length === 0 ? (
-                    <tr>
-                      <td colSpan="3">등록된 연맹원이 없습니다.</td>
-                    </tr>
+                    <p className="member-mobile-empty">등록된 연맹원이 없습니다.</p>
                   ) : (
                     members.map((row) => (
-                      <tr key={row.id}>
-                        <td>
-                          <input
-                            type="text"
-                            value={row.name}
-                            onChange={(event) =>
-                              handleMemberFieldChange(row.id, 'name', event.target.value)
-                            }
-                            disabled={isSavingMembers}
-                          />
-                        </td>
-                        <td>
-                          <input
-                            type="number"
-                            step="0.01"
-                            value={row.first_squad_power}
-                            onChange={(event) =>
-                              handleMemberFieldChange(row.id, 'first_squad_power', event.target.value)
-                            }
-                            disabled={isSavingMembers}
-                          />
-                        </td>
-                        <td>
-                          <input
-                            type="number"
-                            step="1"
-                            value={row.hero_power}
-                            onChange={(event) =>
-                              handleMemberFieldChange(row.id, 'hero_power', event.target.value)
-                            }
-                            disabled={isSavingMembers}
-                          />
-                        </td>
-                      </tr>
+                      <div className="member-mobile-card" key={row.id}>
+                        <label className="member-field-label" htmlFor={`member-name-${row.id}`}>
+                          아이디
+                        </label>
+                        <input
+                          id={`member-name-${row.id}`}
+                          type="text"
+                          value={row.name}
+                          onChange={(event) =>
+                            handleMemberFieldChange(row.id, 'name', event.target.value)
+                          }
+                          disabled={isSavingMembers}
+                        />
+
+                        <label
+                          className="member-field-label"
+                          htmlFor={`member-first-${row.id}`}
+                        >
+                          1군 투력
+                        </label>
+                        <input
+                          id={`member-first-${row.id}`}
+                          type="number"
+                          step="0.01"
+                          value={row.first_squad_power}
+                          onChange={(event) =>
+                            handleMemberFieldChange(row.id, 'first_squad_power', event.target.value)
+                          }
+                          disabled={isSavingMembers}
+                        />
+
+                        <label className="member-field-label" htmlFor={`member-hero-${row.id}`}>
+                          총 영웅 투력
+                        </label>
+                        <input
+                          id={`member-hero-${row.id}`}
+                          type="number"
+                          step="1"
+                          value={row.hero_power}
+                          onChange={(event) =>
+                            handleMemberFieldChange(row.id, 'hero_power', event.target.value)
+                          }
+                          disabled={isSavingMembers}
+                        />
+                      </div>
                     ))
                   )}
-                </tbody>
-              </table>
-            )}
+                </div>
+              ) : (
+                <table className="member-table">
+                  <thead>
+                    <tr>
+                      <th>아이디</th>
+                      <th>1군 투력</th>
+                      <th>총 영웅 투력</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {isLoadingMembers ? (
+                      <tr>
+                        <td colSpan="3">연맹원 정보를 불러오는 중입니다…</td>
+                      </tr>
+                    ) : members.length === 0 ? (
+                      <tr>
+                        <td colSpan="3">등록된 연맹원이 없습니다.</td>
+                      </tr>
+                    ) : (
+                      members.map((row) => (
+                        <tr key={row.id}>
+                          <td>
+                            <input
+                              type="text"
+                              value={row.name}
+                              onChange={(event) =>
+                                handleMemberFieldChange(row.id, 'name', event.target.value)
+                              }
+                              disabled={isSavingMembers}
+                            />
+                          </td>
+                          <td>
+                            <input
+                              type="number"
+                              step="0.01"
+                              value={row.first_squad_power}
+                              onChange={(event) =>
+                                handleMemberFieldChange(row.id, 'first_squad_power', event.target.value)
+                              }
+                              disabled={isSavingMembers}
+                            />
+                          </td>
+                          <td>
+                            <input
+                              type="number"
+                              step="1"
+                              value={row.hero_power}
+                              onChange={(event) =>
+                                handleMemberFieldChange(row.id, 'hero_power', event.target.value)
+                              }
+                              disabled={isSavingMembers}
+                            />
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              ))}
           </div>
 
           <div className="member-footer">
@@ -398,9 +486,6 @@ export default function Home() {
               })}
             </div>
 
-            <button type="button" className="member-add-btn" onClick={() => setIsMemberModalOpen(true)}>
-              연맹원 추가
-            </button>
           </div>
         </article>
       );
@@ -424,9 +509,8 @@ export default function Home() {
   }
 
   return (
-    <div className="home-page">
+    <div className={`home-page${isSidebarOpen ? '' : ' sidebar-collapsed'}`}>
       <aside className="home-sidebar">
-        <div className="brand">STr 관리</div>
         <nav>
           {NAV_ITEMS.map((item) => {
             const disabled = item.restricted && !ADMIN_ROLES.includes(permission);
@@ -448,14 +532,49 @@ export default function Home() {
 
       <main className="home-main">
         <header className="home-header">
-          <div>
-            <p className="welcome-label">환영합니다</p>
-            <h1>{permission} 권한 계정</h1>
+          <div className="header-left">
+            <div className="header-menu-wrapper">
+              <button
+                type="button"
+                className="sidebar-toggle"
+                onClick={() => {
+                  if (isCompactView) {
+                    setIsMobileMenuOpen((prev) => !prev);
+                  } else {
+                    setIsSidebarOpen((prev) => !prev);
+                  }
+                }}
+                aria-pressed={isCompactView ? undefined : isSidebarOpen}
+                aria-expanded={isCompactView ? isMobileMenuOpen : undefined}
+                aria-label="메뉴"
+              >
+                <HiMenuAlt2 aria-hidden="true" />
+              </button>
+
+              {isCompactView && isMobileMenuOpen && (
+                <div className="header-menu-dropdown">
+                  {NAV_ITEMS.map((item) => {
+                    const disabled = item.restricted && !ADMIN_ROLES.includes(permission);
+                    return (
+                      <button
+                        key={item.id}
+                        type="button"
+                        className="dropdown-item"
+                        disabled={disabled}
+                        onClick={() => handleNavSelect(item)}
+                      >
+                        {item.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           </div>
           <div className="user-panel">
-            <span className="user-email">{userEmail}</span>
-            <button type="button" className="logout-btn" onClick={handleLogout}>
-              로그아웃
+            {!isCompactView && <span className="user-email">{userEmail}</span>}
+            <button type="button" className="logout-btn" onClick={handleLogout} aria-label="로그아웃">
+              <HiLogout aria-hidden="true" />
             </button>
           </div>
         </header>
@@ -463,23 +582,25 @@ export default function Home() {
         <section className="home-content">{renderContent()}</section>
       </main>
 
-      <nav className="home-bottom-nav">
-        {NAV_ITEMS.map((item) => {
-          const disabled = item.restricted && !ADMIN_ROLES.includes(permission);
-          const isActive = activeSection === item.id;
-          return (
-            <button
-              key={item.id}
-              className={`bottom-btn${isActive ? ' active' : ''}${disabled ? ' disabled' : ''}`}
-              type="button"
-              disabled={disabled}
-              onClick={() => handleNavSelect(item)}
-            >
-              {item.label}
-            </button>
-          );
-        })}
-      </nav>
+      {!isCompactView && (
+        <nav className="home-bottom-nav">
+          {NAV_ITEMS.map((item) => {
+            const disabled = item.restricted && !ADMIN_ROLES.includes(permission);
+            const isActive = activeSection === item.id;
+            return (
+              <button
+                key={item.id}
+                className={`bottom-btn${isActive ? ' active' : ''}${disabled ? ' disabled' : ''}`}
+                type="button"
+                disabled={disabled}
+                onClick={() => handleNavSelect(item)}
+              >
+                {item.label}
+              </button>
+            );
+          })}
+        </nav>
+      )}
 
       {isMemberModalOpen && (
         <div className="modal-backdrop" role="dialog" aria-modal="true">
