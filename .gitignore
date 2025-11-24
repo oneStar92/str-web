@@ -38,3 +38,4 @@ supabase/functions/.netlify/
 coverage/
 tmp/
 docs/
+AGENTS.md
