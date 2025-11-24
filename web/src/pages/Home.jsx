@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { HiMenuAlt2, HiLogout } from 'react-icons/hi';
+import { HiMenuAlt2, HiLogout, HiPencil, HiTrash } from 'react-icons/hi';
 import { supabase } from '../lib/supabaseClient.js';
 
 const ADMIN_ROLES = ['SUPER', 'ADMIN'];
@@ -10,32 +10,63 @@ const NAV_ITEMS = [
   { id: 'member', label: '연맹원 관리', restricted: true },
 ];
 const MEMBERS_PER_PAGE = 10;
+const LOCK_MINUTES = 5;
 
 export default function Home() {
   const navigate = useNavigate();
+  const [userId, setUserId] = useState('');
   const [userEmail, setUserEmail] = useState('');
   const [permission, setPermission] = useState('');
   const [loading, setLoading] = useState(true);
   const [activeSection, setActiveSection] = useState('desert');
+  const [now, setNow] = useState(Date.now());
+  const activeLockRef = useRef(null);
+  const clearMemberLockState = useCallback((memberId) => {
+    if (!memberId) return;
+    setMembers((prev) =>
+      prev.map((row) =>
+        row.id === memberId ? { ...row, locked_by: null, locked_until: null } : row,
+      ),
+    );
+  }, []);
 
   const [isMemberModalOpen, setIsMemberModalOpen] = useState(false);
+  const [memberModalMode, setMemberModalMode] = useState('create'); // 'create' | 'edit'
+  const [editingMember, setEditingMember] = useState(null);
   const [memberResultModal, setMemberResultModal] = useState({ open: false, type: '', message: '' });
   const [infoModal, setInfoModal] = useState({ open: false, message: '' });
 
   const [memberForm, setMemberForm] = useState({ name: '', first_squad_power: '', hero_power: '' });
   const [memberStatus, setMemberStatus] = useState({ type: '', message: '' });
   const [isSubmittingMember, setIsSubmittingMember] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [isDeletingMember, setIsDeletingMember] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [isCompactView, setIsCompactView] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
   const [members, setMembers] = useState([]);
-  const [originalMembers, setOriginalMembers] = useState([]);
   const [memberPage, setMemberPage] = useState(1);
   const [totalMembers, setTotalMembers] = useState(0);
   const [isLoadingMembers, setIsLoadingMembers] = useState(false);
-  const [isSavingMembers, setIsSavingMembers] = useState(false);
   const [memberError, setMemberError] = useState('');
+
+  const formatMember = useCallback((row) => {
+    if (!row) return null;
+    return {
+      id: row.id,
+      name: row.name ?? '',
+      first_squad_power:
+        row.first_squad_power !== null && row.first_squad_power !== undefined
+          ? row.first_squad_power.toString()
+          : '',
+      hero_power:
+        row.hero_power !== null && row.hero_power !== undefined ? row.hero_power.toString() : '',
+      updated_at: row.updated_at,
+      locked_by: row.locked_by,
+      locked_until: row.locked_until,
+    };
+  }, []);
 
   useEffect(() => {
     if (!supabase) {
@@ -54,6 +85,7 @@ export default function Home() {
         return;
       }
 
+      setUserId(user.id);
       setUserEmail(user.email ?? '');
 
       const { data, error } = await supabase
@@ -85,7 +117,9 @@ export default function Home() {
 
       const { data, error, count } = await supabase
         .from('member')
-        .select('id, name, first_squad_power, hero_power', { count: 'exact' })
+        .select('id, name, first_squad_power, hero_power, updated_at, locked_by, locked_until', {
+          count: 'exact',
+        })
         .order('id', { ascending: true })
         .range(from, to);
 
@@ -94,28 +128,46 @@ export default function Home() {
       if (error) {
         setMemberError(error.message ?? '연맹원 목록을 불러오지 못했습니다.');
         setMembers([]);
-        setOriginalMembers([]);
         setTotalMembers(0);
         return;
       }
 
-      const formatted = (data ?? []).map((row) => ({
-        id: row.id,
-        name: row.name ?? '',
-        first_squad_power:
-          row.first_squad_power !== null && row.first_squad_power !== undefined
-            ? row.first_squad_power.toString()
-            : '',
-        hero_power:
-          row.hero_power !== null && row.hero_power !== undefined ? row.hero_power.toString() : '',
-      }));
+      const formatted = (data ?? []).map((row) => formatMember(row));
 
       setMembers(formatted);
-      setOriginalMembers(formatted.map((row) => ({ ...row })));
       setTotalMembers(count ?? 0);
     },
-    [supabase],
+    [supabase, formatMember],
   );
+
+  useEffect(() => {
+    if (!supabase) return;
+    const channel = supabase
+      .channel('member-changes')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'member' },
+        (payload) => {
+          const type = payload.eventType;
+          if (type === 'UPDATE') {
+            const formatted = formatMember(payload.new);
+            setMembers((prev) =>
+              prev.map((row) => (row.id === payload.new.id ? formatted ?? row : row)),
+            );
+          } else if (type === 'DELETE') {
+            setMembers((prev) => prev.filter((row) => row.id !== payload.old.id));
+          }
+          if (type === 'INSERT' || type === 'DELETE') {
+            loadMembers(memberPage);
+          }
+        },
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [supabase, loadMembers, memberPage, formatMember]);
 
   useEffect(() => {
     if (activeSection === 'member' && ADMIN_ROLES.includes(permission)) {
@@ -140,9 +192,69 @@ export default function Home() {
     }
   }, [isCompactView]);
 
+  useEffect(() => {
+    const nowTs = Date.now();
+    const futureExpirations = members
+      .map((row) => (row.locked_until ? new Date(row.locked_until).getTime() : null))
+      .filter((ts) => ts && ts > nowTs);
+
+    if (futureExpirations.length === 0) return undefined;
+
+    // 가장 가까운 만료 시점에 맞춰 2~30초 사이로 갱신
+    const soonest = Math.min(...futureExpirations);
+    const delta = soonest - nowTs + 500; // 약간의 버퍼
+    const nextTickMs = Math.min(30000, Math.max(2000, delta));
+
+    const timer = setTimeout(() => setNow(Date.now()), nextTickMs);
+    return () => clearTimeout(timer);
+  }, [members]);
+
   const handleLogout = async () => {
     await supabase?.auth.signOut();
     navigate('/');
+  };
+
+  const acquireMemberLock = async (memberId) => {
+    if (!supabase) return null;
+    if (!userId) {
+      setInfoModal({
+        open: true,
+        message: '사용자 정보를 불러오는 중입니다. 잠시 후 다시 시도하세요.',
+      });
+      return null;
+    }
+
+    const nowIso = new Date().toISOString();
+    const lockUntil = new Date(Date.now() + LOCK_MINUTES * 60 * 1000).toISOString();
+    const { data, error } = await supabase
+      .from('member')
+      .update({ locked_by: userId, locked_until: lockUntil })
+      .eq('id', memberId)
+      .or(`locked_by.is.null,locked_until.lte.${nowIso},locked_by.eq.${userId}`)
+      .select('id, locked_by, locked_until, updated_at')
+      .maybeSingle();
+
+    if (error || !data) {
+      setInfoModal({
+        open: true,
+        message: '잠금을 설정하지 못했습니다. 잠금이 해제된 후 다시 시도하세요.',
+      });
+      return null;
+    }
+
+    activeLockRef.current = memberId;
+    return data;
+  };
+
+  const releaseMemberLock = async (memberId) => {
+    if (!memberId || !supabase) return;
+    activeLockRef.current = null;
+    await supabase
+      .from('member')
+      .update({ locked_by: null, locked_until: null })
+      .eq('id', memberId)
+      .eq('locked_by', userId);
+    clearMemberLockState(memberId);
   };
 
   const handleMemberChange = (event) => {
@@ -152,6 +264,12 @@ export default function Home() {
 
   const handleMemberModalClose = () => {
     setIsMemberModalOpen(false);
+    setMemberModalMode('create');
+    if (editingMember?.id) {
+      releaseMemberLock(editingMember.id);
+      clearMemberLockState(editingMember.id);
+    }
+    setEditingMember(null);
     setMemberForm({ name: '', first_squad_power: '', hero_power: '' });
     setMemberStatus({ type: '', message: '' });
     setMemberResultModal({ open: false, type: '', message: '' });
@@ -200,6 +318,152 @@ export default function Home() {
     }
   };
 
+  // Release lock on unmount if any (best-effort)
+  useEffect(() => {
+    return () => {
+      if (activeLockRef.current) {
+        releaseMemberLock(activeLockRef.current);
+      }
+    };
+  }, []);
+
+  const isRowLocked = (row) => {
+    if (!row.locked_by || !row.locked_until) return false;
+    const expires = new Date(row.locked_until).getTime();
+    if (Number.isNaN(expires) || expires <= now) return false;
+    return row.locked_by !== userId;
+  };
+
+  const openCreateMemberModal = () => {
+    setMemberModalMode('create');
+    setEditingMember(null);
+    setMemberForm({ name: '', first_squad_power: '', hero_power: '' });
+    setMemberStatus({ type: '', message: '' });
+    setIsMemberModalOpen(true);
+  };
+
+  const openEditMemberModal = (row) => {
+    setMemberModalMode('edit');
+    setEditingMember({ id: row.id, updated_at: row.updated_at });
+    setMemberForm({
+      name: row.name ?? '',
+      first_squad_power: row.first_squad_power ?? '',
+      hero_power: row.hero_power ?? '',
+    });
+    setMemberStatus({ type: '', message: '' });
+    setIsMemberModalOpen(true);
+  };
+
+  const handleGuardedEdit = (row) => {
+    if (isRowLocked(row)) {
+      setInfoModal({
+        open: true,
+        message: '다른 사용자가 편집 중입니다. 잠금이 해제되면 다시 시도해주세요.',
+      });
+      return;
+    }
+
+    acquireMemberLock(row.id).then((lockedRow) => {
+      if (!lockedRow) return;
+      openEditMemberModal({ ...row, locked_until: lockedRow.locked_until, updated_at: lockedRow.updated_at });
+      setMembers((prev) =>
+        prev.map((item) =>
+          item.id === row.id
+            ? { ...item, locked_by: userId, locked_until: lockedRow.locked_until }
+            : item,
+        ),
+      );
+    });
+  };
+
+  const handleGuardedDelete = (row) => {
+    if (isRowLocked(row)) {
+      setInfoModal({
+        open: true,
+        message: '다른 사용자가 편집 중입니다. 잠금이 해제되면 다시 시도해주세요.',
+      });
+      return;
+    }
+    setDeleteTarget(row);
+  };
+
+  const handleMemberUpdate = async (event) => {
+    event.preventDefault();
+    if (!editingMember) return;
+
+    if (!memberForm.name.trim()) {
+      setMemberStatus({ type: 'error', message: '아이디(닉네임)를 입력해주세요.' });
+      return;
+    }
+
+    setIsSubmittingMember(true);
+    const { data, error } = await supabase
+      .from('member')
+      .update({
+        name: memberForm.name.trim(),
+        first_squad_power: memberForm.first_squad_power
+          ? Number(memberForm.first_squad_power)
+          : null,
+        hero_power: memberForm.hero_power ? Number(memberForm.hero_power) : null,
+      })
+      .eq('id', editingMember.id)
+      .eq('locked_by', userId)
+      .eq('updated_at', editingMember.updated_at ?? null)
+      .select()
+      .maybeSingle();
+
+    setIsSubmittingMember(false);
+
+    if (error || !data) {
+      const message =
+        error?.message ??
+        '다른 사용자가 먼저 수정했을 수 있습니다. 새로고침 후 다시 시도해주세요.';
+      setMemberStatus({ type: 'error', message });
+      setMemberResultModal({ open: true, type: 'error', message });
+      return;
+    }
+
+    await releaseMemberLock(editingMember.id);
+    clearMemberLockState(editingMember.id);
+
+    setMemberResultModal({
+      open: true,
+      type: 'success',
+      message: '연맹원 정보가 수정되었습니다.',
+    });
+    await loadMembers(memberPage);
+  };
+
+  const handleDeleteMember = (row) => {
+    setDeleteTarget(row);
+  };
+
+  const confirmDeleteMember = async () => {
+    if (!deleteTarget) return;
+    setIsDeletingMember(true);
+    const { error } = await supabase.from('member').delete().eq('id', deleteTarget.id);
+    setIsDeletingMember(false);
+
+    if (error) {
+      setMemberResultModal({
+        open: true,
+        type: 'error',
+        message: error.message ?? '연맹원을 삭제하지 못했습니다.',
+      });
+      return;
+    }
+
+    clearMemberLockState(deleteTarget.id);
+
+    setMemberResultModal({
+      open: true,
+      type: 'success',
+      message: '연맹원이 삭제되었습니다.',
+    });
+    setDeleteTarget(null);
+    loadMembers(memberPage);
+  };
+
   const handleNavSelect = (item) => {
     if (item.id === 'desert' || item.id === 'canyon') {
       setInfoModal({ open: true, message: '구현중...' });
@@ -216,84 +480,6 @@ export default function Home() {
     if (isCompactView) {
       setIsMobileMenuOpen(false);
     }
-  };
-
-  const handleMemberFieldChange = (id, field, value) => {
-    setMembers((prev) =>
-      prev.map((row) => (row.id === id ? { ...row, [field]: value } : row)),
-    );
-  };
-
-  const originalMemberMap = useMemo(() => {
-    const map = new Map();
-    originalMembers.forEach((row) => map.set(row.id, row));
-    return map;
-  }, [originalMembers]);
-
-  const hasMemberChanges = useMemo(
-    () =>
-      members.length > 0 &&
-      members.some((row) => {
-        const original = originalMemberMap.get(row.id);
-        if (!original) return true;
-        return (
-          original.name !== row.name ||
-          original.first_squad_power !== row.first_squad_power ||
-          original.hero_power !== row.hero_power
-        );
-      }),
-    [members, originalMemberMap],
-  );
-
-  const handleMemberRevert = () => {
-    setMembers(originalMembers.map((row) => ({ ...row })));
-  };
-
-  const handleMemberSave = async () => {
-    if (!hasMemberChanges) {
-      return;
-    }
-
-    const dirtyRows = members.filter((row) => {
-      const original = originalMemberMap.get(row.id);
-      if (!original) return true;
-      return (
-        original.name !== row.name ||
-        original.first_squad_power !== row.first_squad_power ||
-        original.hero_power !== row.hero_power
-      );
-    });
-
-    if (!dirtyRows.length) {
-      return;
-    }
-
-    const updates = dirtyRows.map((row) => ({
-      id: row.id,
-      name: row.name.trim(),
-      first_squad_power: Number(row.first_squad_power),
-      hero_power: Number(row.hero_power),
-    }));
-
-    setIsSavingMembers(true);
-    const { error } = await supabase.from('member').upsert(updates, { onConflict: 'id' });
-    setIsSavingMembers(false);
-
-    if (error) {
-      setMemberResultModal({
-        open: true,
-        type: 'error',
-        message: error.message ?? '연맹원 정보를 저장하지 못했습니다.',
-      });
-      return;
-    }
-
-    setMemberResultModal({
-      open: true,
-      type: 'success',
-      message: '변경 사항이 저장되었습니다.',
-    });
-    loadMembers(memberPage);
   };
 
   const totalPages = Math.max(1, Math.ceil(totalMembers / MEMBERS_PER_PAGE));
@@ -321,25 +507,9 @@ export default function Home() {
               <button
                 type="button"
                 className="member-action-btn tertiary"
-                onClick={() => setIsMemberModalOpen(true)}
+                onClick={openCreateMemberModal}
               >
                 연맹원 추가
-              </button>
-              <button
-                type="button"
-                className="member-action-btn secondary"
-                disabled={!hasMemberChanges || isSavingMembers}
-                onClick={handleMemberRevert}
-              >
-                되돌리기
-              </button>
-              <button
-                type="button"
-                className="member-action-btn primary"
-                disabled={!hasMemberChanges || isSavingMembers}
-                onClick={handleMemberSave}
-              >
-                {isSavingMembers ? '저장 중…' : '저장하기'}
               </button>
             </div>
           </header>
@@ -357,49 +527,46 @@ export default function Home() {
                   ) : (
                     members.map((row) => (
                       <div className="member-mobile-card" key={row.id}>
-                        <label className="member-field-label" htmlFor={`member-name-${row.id}`}>
-                          아이디
-                        </label>
-                        <input
-                          id={`member-name-${row.id}`}
-                          type="text"
-                          value={row.name}
-                          onChange={(event) =>
-                            handleMemberFieldChange(row.id, 'name', event.target.value)
-                          }
-                          disabled={isSavingMembers}
-                        />
-
-                        <label
-                          className="member-field-label"
-                          htmlFor={`member-first-${row.id}`}
-                        >
-                          1군 투력
-                        </label>
-                        <input
-                          id={`member-first-${row.id}`}
-                          type="number"
-                          step="0.01"
-                          value={row.first_squad_power}
-                          onChange={(event) =>
-                            handleMemberFieldChange(row.id, 'first_squad_power', event.target.value)
-                          }
-                          disabled={isSavingMembers}
-                        />
-
-                        <label className="member-field-label" htmlFor={`member-hero-${row.id}`}>
-                          총 영웅 투력
-                        </label>
-                        <input
-                          id={`member-hero-${row.id}`}
-                          type="number"
-                          step="1"
-                          value={row.hero_power}
-                          onChange={(event) =>
-                            handleMemberFieldChange(row.id, 'hero_power', event.target.value)
-                          }
-                          disabled={isSavingMembers}
-                        />
+                        {isRowLocked(row) ? <p className="member-lock-badge">다른 사용자가 편집 중</p> : null}
+                        <div className="member-field">
+                          <p className="member-field-label">아이디</p>
+                          <p className="member-field-value">{row.name || '-'}</p>
+                        </div>
+                        <div className="member-field">
+                          <p className="member-field-label">1군 투력</p>
+                          <p className="member-field-value">{row.first_squad_power || '-'}</p>
+                        </div>
+                        <div className="member-field">
+                          <p className="member-field-label">총 영웅 투력</p>
+                          <p className="member-field-value">{row.hero_power || '-'}</p>
+                        </div>
+                        <div className="member-row-actions">
+                          {(() => {
+                            const locked = isRowLocked(row);
+                            return (
+                              <>
+                                <button
+                                  type="button"
+                                  className={`member-icon-btn edit${locked ? ' disabled' : ''}`}
+                                  onClick={() => !locked && handleGuardedEdit(row)}
+                                  disabled={locked}
+                                  title={locked ? '다른 사용자가 편집 중' : '수정'}
+                                >
+                                  <HiPencil aria-label="수정" />
+                                </button>
+                                <button
+                                  type="button"
+                                  className={`member-icon-btn delete${locked ? ' disabled' : ''}`}
+                                  onClick={() => !locked && handleGuardedDelete(row)}
+                                  disabled={locked}
+                                  title={locked ? '잠금 해제 후 삭제 가능' : '삭제'}
+                                >
+                                  <HiTrash aria-label="삭제" />
+                                </button>
+                              </>
+                            );
+                          })()}
+                        </div>
                       </div>
                     ))
                   )}
@@ -411,51 +578,55 @@ export default function Home() {
                       <th>아이디</th>
                       <th>1군 투력</th>
                       <th>총 영웅 투력</th>
+                      <th>작업</th>
                     </tr>
                   </thead>
                   <tbody>
                     {isLoadingMembers ? (
                       <tr>
-                        <td colSpan="3">연맹원 정보를 불러오는 중입니다…</td>
+                        <td colSpan="4">연맹원 정보를 불러오는 중입니다…</td>
                       </tr>
                     ) : members.length === 0 ? (
                       <tr>
-                        <td colSpan="3">등록된 연맹원이 없습니다.</td>
+                        <td colSpan="4">등록된 연맹원이 없습니다.</td>
                       </tr>
                     ) : (
                       members.map((row) => (
                         <tr key={row.id}>
                           <td>
-                            <input
-                              type="text"
-                              value={row.name}
-                              onChange={(event) =>
-                                handleMemberFieldChange(row.id, 'name', event.target.value)
-                              }
-                              disabled={isSavingMembers}
-                            />
+                            {row.name || '-'}
+                            {isRowLocked(row) ? <span className="member-lock-pill">편집 중</span> : null}
                           </td>
-                          <td>
-                            <input
-                              type="number"
-                              step="0.01"
-                              value={row.first_squad_power}
-                              onChange={(event) =>
-                                handleMemberFieldChange(row.id, 'first_squad_power', event.target.value)
-                              }
-                              disabled={isSavingMembers}
-                            />
-                          </td>
-                          <td>
-                            <input
-                              type="number"
-                              step="1"
-                              value={row.hero_power}
-                              onChange={(event) =>
-                                handleMemberFieldChange(row.id, 'hero_power', event.target.value)
-                              }
-                              disabled={isSavingMembers}
-                            />
+                          <td>{row.first_squad_power || '-'}</td>
+                          <td>{row.hero_power || '-'}</td>
+                          <td className="member-actions-cell">
+                            {(() => {
+                              const locked = isRowLocked(row);
+                              return (
+                                <>
+                                  <button
+                                    type="button"
+                                    className={`member-icon-btn edit${locked ? ' disabled' : ''}`}
+                                    onClick={() => !locked && handleGuardedEdit(row)}
+                                    aria-label="수정"
+                                    disabled={locked}
+                                    title={locked ? '다른 사용자가 편집 중' : '수정'}
+                                  >
+                                    <HiPencil />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className={`member-icon-btn delete${locked ? ' disabled' : ''}`}
+                                    onClick={() => !locked && handleGuardedDelete(row)}
+                                    aria-label="삭제"
+                                    disabled={locked}
+                                    title={locked ? '잠금 해제 후 삭제 가능' : '삭제'}
+                                  >
+                                    <HiTrash />
+                                  </button>
+                                </>
+                              );
+                            })()}
                           </td>
                         </tr>
                       ))
@@ -604,9 +775,14 @@ export default function Home() {
 
       {isMemberModalOpen && (
         <div className="modal-backdrop" role="dialog" aria-modal="true">
-          <form className="modal-card form-modal" onSubmit={handleMemberSubmit}>
+          <form
+            className="modal-card form-modal"
+            onSubmit={memberModalMode === 'edit' ? handleMemberUpdate : handleMemberSubmit}
+          >
             <div className="modal-header">
-              <p className="modal-title">연맹원 추가</p>
+              <p className="modal-title">
+                {memberModalMode === 'edit' ? '연맹원 수정' : '연맹원 추가'}
+              </p>
               <button type="button" className="modal-close" onClick={handleMemberModalClose}>
                 ×
               </button>
@@ -641,12 +817,27 @@ export default function Home() {
               value={memberForm.hero_power}
               onChange={handleMemberChange}
             />
+            {memberStatus.message && (
+              <p
+                className={`member-form-status${
+                  memberStatus.type === 'error' ? ' error' : ' success'
+                }`}
+              >
+                {memberStatus.message}
+              </p>
+            )}
             <div className="modal-actions">
               <button type="button" className="modal-button secondary" onClick={handleMemberModalClose}>
                 취소하기
               </button>
               <button type="submit" className="modal-button" disabled={isSubmittingMember}>
-                {isSubmittingMember ? '추가 중…' : '추가하기'}
+                {isSubmittingMember
+                  ? memberModalMode === 'edit'
+                    ? '수정 중…'
+                    : '추가 중…'
+                  : memberModalMode === 'edit'
+                    ? '수정하기'
+                    : '추가하기'}
               </button>
             </div>
           </form>
@@ -663,6 +854,35 @@ export default function Home() {
             <button type="button" className="modal-button" onClick={handleMemberResultConfirm}>
               확인
             </button>
+          </div>
+        </div>
+      )}
+
+      {deleteTarget && (
+        <div className="modal-backdrop" role="dialog" aria-modal="true">
+          <div className="modal-card">
+            <p className="modal-title">연맹원 삭제</p>
+            <p className="modal-body">
+              <strong>{deleteTarget.name}</strong>을(를) 삭제할까요? 이 작업은 되돌릴 수 없습니다.
+            </p>
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="modal-button secondary"
+                onClick={() => setDeleteTarget(null)}
+                disabled={isDeletingMember}
+              >
+                취소
+              </button>
+              <button
+                type="button"
+                className="modal-button danger"
+                onClick={confirmDeleteMember}
+                disabled={isDeletingMember}
+              >
+                {isDeletingMember ? '삭제 중…' : '삭제하기'}
+              </button>
+            </div>
           </div>
         </div>
       )}
