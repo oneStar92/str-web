@@ -2,6 +2,10 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import Login from './pages/Login.jsx';
 import Signup from './pages/Signup.jsx';
 import Home from './pages/Home.jsx';
+import Desert from './pages/Desert.jsx';
+import Canyon from './pages/Canyon.jsx';
+import Members from './pages/Members.jsx';
+import { Navigate } from 'react-router-dom';
 
 function AuthLayout({ children }) {
   return (
@@ -35,7 +39,12 @@ export default function App() {
             </AuthLayout>
           }
         />
-        <Route path="/home" element={<Home />} />
+        <Route path="/home" element={<Home />}>
+          <Route index element={<Navigate to="/home/desert" replace />} />
+          <Route path="desert" element={<Desert />} />
+          <Route path="canyon" element={<Canyon />} />
+          <Route path="members" element={<Members />} />
+        </Route>
       </Routes>
     </BrowserRouter>
   );
